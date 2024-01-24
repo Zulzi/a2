@@ -1,6 +1,8 @@
 use crate::request::notification::{NotificationBuilder, NotificationOptions};
 use crate::request::payload::{APSAlert, APSSound, Payload, APS};
 
+use crate::Error;
+use erased_serde::Serialize;
 use std::{borrow::Cow, collections::BTreeMap};
 
 /// Represents a bool that serializes as a u8 0/1 for false/true respectively
@@ -117,6 +119,7 @@ pub struct DefaultNotificationBuilder<'a> {
     mutable_content: u8,
     content_available: Option<u8>,
     has_edited_alert: bool,
+    data: BTreeMap<&'a str, serde_json::Value>,
 }
 
 impl<'a> DefaultNotificationBuilder<'a> {
@@ -160,6 +163,7 @@ impl<'a> DefaultNotificationBuilder<'a> {
             mutable_content: 0,
             content_available: None,
             has_edited_alert: false,
+            data: BTreeMap::new(),
         }
     }
 
@@ -516,6 +520,35 @@ impl<'a> DefaultNotificationBuilder<'a> {
         self.content_available = Some(1);
         self
     }
+
+    /// Used for adding custom data to the notification payload
+    /// This is required for custom actions on the notification such as -> https://developer.apple.com/documentation/activitykit/starting-and-updating-live-activities-with-activitykit-push-notifications
+    ///
+    /// ```rust
+    /// # use a2::request::notification::{DefaultNotificationBuilder, NotificationBuilder};
+    /// # use a2::request::payload::PayloadLike;
+    /// # fn main() {
+    /// use std::collections::HashMap;
+    /// let mut builder = DefaultNotificationBuilder::new()
+    ///     .set_title("a title");
+    ///
+    /// let mut custom_data = HashMap::new();
+    ///
+    /// custom_data.insert("foo", "bar");
+    /// builder.add_custom_data("foo_data", &custom_data).unwrap();
+    /// let payload = builder.build("token", Default::default());
+    ///
+    /// assert_eq!(
+    ///     "{\"aps\":{\"alert\":{\"title\":\"a title\"},\"mutable-content\":0,\"foo_data\":{\"foo\":\"bar\"}}}",
+    ///     &payload.to_json_string().unwrap()
+    /// );
+    /// # }
+    /// ```
+    pub fn add_custom_data(&mut self, root_key: &'a str, data: &dyn Serialize) -> Result<&mut Self, Error> {
+        self.data.insert(root_key, serde_json::to_value(data)?);
+
+        Ok(self)
+    }
 }
 
 impl<'a> NotificationBuilder<'a> for DefaultNotificationBuilder<'a> {
@@ -536,6 +569,7 @@ impl<'a> NotificationBuilder<'a> for DefaultNotificationBuilder<'a> {
                 category: self.category,
                 mutable_content: Some(self.mutable_content),
                 url_args: None,
+                data: self.data,
             },
             device_token,
             options,
@@ -799,6 +833,106 @@ mod tests {
             "custom": {
                 "key_str": "foo",
                 "key_str2": "bar"
+            }
+        });
+
+        assert_eq!(expected_payload, to_value(payload).unwrap());
+    }
+
+    #[test]
+    fn test_custom_notification_with_minimal_required_values() {
+        #[derive(Serialize, Debug)]
+        struct SubData {
+            nothing: &'static str,
+        }
+
+        #[derive(Serialize, Debug)]
+        struct TestData {
+            key_str: &'static str,
+            key_num: u32,
+            key_bool: bool,
+            key_struct: SubData,
+        }
+
+        let test_data = TestData {
+            key_str: "foo",
+            key_num: 42,
+            key_bool: false,
+            key_struct: SubData { nothing: "here" },
+        };
+
+        let mut builder = DefaultNotificationBuilder::new()
+            .set_title("the title")
+            .set_body("the body");
+
+        builder.add_custom_data("custom", &test_data).unwrap();
+
+        let payload = builder.build("device-token", Default::default());
+
+        let expected_payload = json!({
+            "aps": {
+                "alert": {
+                    "body": "the body",
+                    "title": "the title",
+                },
+                "mutable-content": 0,
+                "custom": {
+                    "key_str": "foo",
+                    "key_num": 42,
+                    "key_bool": false,
+                    "key_struct": {
+                        "nothing": "here"
+                    }
+                },
+            }
+        });
+
+        assert_eq!(expected_payload, to_value(payload).unwrap());
+    }
+
+    #[test]
+    fn test_multiple_custom_notifications_with_basic_values() {
+        #[derive(Serialize, Debug)]
+        struct SubData {
+            nothing: &'static str,
+        }
+
+        #[derive(Serialize, Debug)]
+        struct ContentState {
+            #[serde(rename = "currentHealthLevel")]
+            current_health_level: f32,
+            #[serde(rename = "eventDescription")]
+            event_description: &'static str,
+        }
+
+        let content_state = ContentState {
+            current_health_level: 0.0,
+            event_description: "Power Panda has been knocked down!",
+        };
+
+        let mut builder = DefaultNotificationBuilder::new()
+            .set_title("the title")
+            .set_body("the body");
+
+        builder.add_custom_data("content-state", &content_state).unwrap();
+        builder.add_custom_data("event", &"update").unwrap();
+        builder.add_custom_data("timestamp", &1685952000).unwrap();
+
+        let payload = builder.build("device-token", Default::default());
+
+        let expected_payload = json!({
+            "aps": {
+                "event": "update",
+                "timestamp": 1685952000,
+                "content-state": {
+                    "currentHealthLevel": 0.0,
+                    "eventDescription": "Power Panda has been knocked down!"
+                },
+                "alert": {
+                    "body": "the body",
+                    "title": "the title",
+                },
+                "mutable-content": 0,
             }
         });
 

@@ -87,6 +87,7 @@ impl<'a> NotificationBuilder<'a> for WebNotificationBuilder<'a> {
                 category: None,
                 mutable_content: None,
                 url_args: Some(self.url_args),
+                data: BTreeMap::new(),
             },
             device_token,
             options,
